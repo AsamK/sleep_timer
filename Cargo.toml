@@ -1,0 +1,9 @@
+[package]
+name = "sleep_timer"
+version = "0.1.0"
+authors = ["AsamK <asamk@gmx.de>"]
+
+[dependencies]
+hyper = "0.10"
+mpd = "0.0.11"
+reroute = "0.3.2"

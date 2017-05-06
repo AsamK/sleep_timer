@@ -11,7 +11,7 @@ use reroute::{Captures, RouterBuilder};
 use std::time;
 use std::error::Error;
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 use std::ops::Add;
 use std::ops::Sub;
@@ -129,7 +129,8 @@ fn main() {
 
     println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
     let mut router_builder = RouterBuilder::new();
-    let tx_mux = Mutex::new(tx);
+    let tx_mux = Arc::new(Mutex::new(tx));
+    let tx_mux2 = tx_mux.clone();
     // Use raw strings so you don't need to escape patterns.
     router_builder.get(r"/sleep/start/(\d+)",
                        move |_: Request, mut res: Response, c: Captures| {
@@ -144,10 +145,25 @@ fn main() {
         res.send(format!("Sleeping for {:?} seconds…\n", dur).as_bytes())
             .unwrap();
 
-        tx_mux
+        tx_mux2
             .lock()
             .unwrap()
             .send(SleepMessage::StartTimer(dur))
+            .unwrap();
+    });
+    router_builder.get(r"/sleep/cancel",
+                       move |_: Request, mut res: Response, _: Captures| {
+        res.headers_mut()
+            .set(ContentType(Mime(TopLevel::Text,
+                                  SubLevel::Plain,
+                                  vec![(Attr::Charset, Value::Utf8)])));
+        res.send(format!("Canceling sleep timer…\n").as_bytes())
+            .unwrap();
+
+        tx_mux
+            .lock()
+            .unwrap()
+            .send(SleepMessage::Cancel)
             .unwrap();
     });
     router_builder.get(r"/sleep/status", status_handler);

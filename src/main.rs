@@ -44,21 +44,18 @@ fn get_status() -> Result<mpd::Status, Box<Error>> {
 }
 
 fn status_handler(_: Request, mut res: Response, _: Captures) {
-    res.headers_mut()
-        .set(ContentType(Mime(TopLevel::Text,
-                              SubLevel::Plain,
-                              vec![(Attr::Charset, Value::Utf8)])));
-    res.send(format!("{:?}", get_status()).as_bytes())
-        .unwrap();
+    res.headers_mut().set(ContentType(Mime(
+        TopLevel::Text,
+        SubLevel::Plain,
+        vec![(Attr::Charset, Value::Utf8)],
+    )));
+    res.send(format!("{:?}", get_status()).as_bytes()).unwrap();
 }
 
 fn pause_handler(_: Request, res: Response, _: Captures) {
     let mut conn = connect_mpd().unwrap();
-    conn.toggle_pause()
-        .expect("Failed to send pause command");
-    let state = conn.status()
-        .expect("Failed to send status command")
-        .state;
+    conn.toggle_pause().expect("Failed to send pause command");
+    let state = conn.status().expect("Failed to send status command").state;
     res.send(format!("State is now {:?}!\n", state).as_bytes())
         .unwrap();
 }
@@ -83,10 +80,7 @@ fn main() {
         let mut state = Option::None::<SleepTimerState>;
         loop {
             let message = match state {
-                Option::None => {
-                    rx.recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                }
+                Option::None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
                 Option::Some(state) => {
                     let now = time::Instant::now();
 
@@ -116,9 +110,9 @@ fn main() {
                     match message {
                         SleepMessage::StartTimer(new_duration) => {
                             Option::from(SleepTimerState {
-                                             duration: new_duration,
-                                             start: time::Instant::now(),
-                                         })
+                                duration: new_duration,
+                                start: time::Instant::now(),
+                            })
                         }
                         SleepMessage::Cancel => Option::None,
                     }
@@ -132,16 +126,18 @@ fn main() {
     let tx_mux = Arc::new(Mutex::new(tx));
     let tx_mux2 = tx_mux.clone();
     // Use raw strings so you don't need to escape patterns.
-    router_builder.get(r"/sleep/start/(\d+)",
-                       move |_: Request, mut res: Response, c: Captures| {
+    router_builder.get(r"/sleep/start/(\d+)", move |_: Request,
+          mut res: Response,
+          c: Captures| {
         let dur = match c {
             Some(cap) => std::time::Duration::from_secs(cap[1].parse::<u64>().unwrap()),
             None => return,
         };
-        res.headers_mut()
-            .set(ContentType(Mime(TopLevel::Text,
-                                  SubLevel::Plain,
-                                  vec![(Attr::Charset, Value::Utf8)])));
+        res.headers_mut().set(ContentType(Mime(
+            TopLevel::Text,
+            SubLevel::Plain,
+            vec![(Attr::Charset, Value::Utf8)],
+        )));
         res.send(format!("Sleeping for {:?} seconds…\n", dur).as_bytes())
             .unwrap();
 
@@ -151,20 +147,18 @@ fn main() {
             .send(SleepMessage::StartTimer(dur))
             .unwrap();
     });
-    router_builder.get(r"/sleep/cancel",
-                       move |_: Request, mut res: Response, _: Captures| {
-        res.headers_mut()
-            .set(ContentType(Mime(TopLevel::Text,
-                                  SubLevel::Plain,
-                                  vec![(Attr::Charset, Value::Utf8)])));
+    router_builder.get(r"/sleep/cancel", move |_: Request,
+          mut res: Response,
+          _: Captures| {
+        res.headers_mut().set(ContentType(Mime(
+            TopLevel::Text,
+            SubLevel::Plain,
+            vec![(Attr::Charset, Value::Utf8)],
+        )));
         res.send(format!("Canceling sleep timer…\n").as_bytes())
             .unwrap();
 
-        tx_mux
-            .lock()
-            .unwrap()
-            .send(SleepMessage::Cancel)
-            .unwrap();
+        tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
     });
     router_builder.get(r"/sleep/status", status_handler);
     router_builder.get(r"/pause", pause_handler);

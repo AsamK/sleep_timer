@@ -7,3 +7,6 @@ authors = ["AsamK <asamk@gmx.de>"]
 hyper = "0.10"
 mpd = "0.0.11"
 reroute = "0.3.2"
+
+[replace]
+"mpd:0.0.11" = { git = 'https://github.com/kstep/rust-mpd' }

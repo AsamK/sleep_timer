@@ -1,20 +1,24 @@
-extern crate mpd;
 extern crate hyper;
-extern crate reroute;
+extern crate mime;
+extern crate mpd;
+extern crate num_cpus;
+extern crate reset_router;
+extern crate tokio_core;
 
-use mpd::Client;
-use hyper::Server;
-use hyper::server::{Request, Response};
 use hyper::header::ContentType;
-use hyper::mime::{Mime, TopLevel, SubLevel, Attr, Value};
-use reroute::{Captures, RouterBuilder};
-use std::time;
+use hyper::server::Response;
+use mpd::Client;
+use reset_router::hyper::Context;
+use reset_router::hyper::ext::ServiceExtensions;
+use reset_router::hyper::Router;
 use std::error::Error;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread::spawn;
+use std::net;
 use std::ops::Add;
 use std::ops::Sub;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::thread;
+use std::time;
 
 const MPD_IP: &str = "127.0.0.1";
 const MPD_PORT: u16 = 6600;
@@ -43,21 +47,20 @@ fn get_status() -> Result<mpd::Status, Box<Error>> {
     Ok(status)
 }
 
-fn status_handler(_: Request, mut res: Response, _: Captures) {
-    res.headers_mut().set(ContentType(Mime(
-        TopLevel::Text,
-        SubLevel::Plain,
-        vec![(Attr::Charset, Value::Utf8)],
-    )));
-    res.send(format!("{:?}", get_status()).as_bytes()).unwrap();
+fn status_handler(_: Context) -> Result<Response, Response> {
+    Ok(Response::new()
+        .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
+        .with_body(format!("{:?}\n", get_status())))
 }
 
-fn pause_handler(_: Request, res: Response, _: Captures) {
+fn pause_handler(_: Context) -> Result<Response, Response> {
     let mut conn = connect_mpd().unwrap();
     conn.toggle_pause().expect("Failed to send pause command");
     let state = conn.status().expect("Failed to send status command").state;
-    res.send(format!("State is now {:?}!\n", state).as_bytes())
-        .unwrap();
+
+    Ok(Response::new()
+        .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
+        .with_body(format!("State is now {:?}!\n", state)))
 }
 
 fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
@@ -71,12 +74,11 @@ fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
     Ok(())
 }
 
-
 fn main() {
     println!("Starting mpd sleep timer server!");
 
     let (tx, rx) = mpsc::channel::<SleepMessage>();
-    spawn(move || {
+    thread::spawn(move || {
         let mut state = Option::None::<SleepTimerState>;
         loop {
             let message = match state {
@@ -93,83 +95,67 @@ fn main() {
                 }
             };
             state = match message {
-                Err(e) => {
-                    match e {
-                        mpsc::RecvTimeoutError::Timeout => {
-                            match connect_mpd().and_then(|mut conn| sleep_now(&mut conn)) {
-                                Ok(_) => {}
-                                Err(e) => println!("Failed to connnect: {:?}", e),
-                            };
+                Err(e) => match e {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        match connect_mpd().and_then(|mut conn| sleep_now(&mut conn)) {
+                            Ok(_) => {}
+                            Err(e) => println!("Failed to connnect: {:?}", e),
+                        };
 
-                            Option::None
-                        }
-                        mpsc::RecvTimeoutError::Disconnected => return,
+                        Option::None
                     }
-                }
-                Ok(message) => {
-                    match message {
-                        SleepMessage::StartTimer(new_duration) => {
-                            Option::from(SleepTimerState {
-                                duration: new_duration,
-                                start: time::Instant::now(),
-                            })
-                        }
-                        SleepMessage::Cancel => Option::None,
-                    }
-                }
+                    mpsc::RecvTimeoutError::Disconnected => return,
+                },
+                Ok(message) => match message {
+                    SleepMessage::StartTimer(new_duration) => Option::from(SleepTimerState {
+                        duration: new_duration,
+                        start: time::Instant::now(),
+                    }),
+                    SleepMessage::Cancel => Option::None,
+                },
             };
         }
     });
 
-    println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
-    let mut router_builder = RouterBuilder::new();
     let tx_mux = Arc::new(Mutex::new(tx));
     let tx_mux2 = tx_mux.clone();
-    // Use raw strings so you don't need to escape patterns.
-    router_builder.get(r"/sleep/start/(\d+)", move |_: Request,
-          mut res: Response,
-          c: Captures| {
-        let dur = match c {
-            Some(cap) => std::time::Duration::from_secs(cap[1].parse::<u64>().unwrap()),
-            None => return,
-        };
-        res.headers_mut().set(ContentType(Mime(
-            TopLevel::Text,
-            SubLevel::Plain,
-            vec![(Attr::Charset, Value::Utf8)],
-        )));
-        res.send(format!("Sleeping for {:?} seconds…\n", dur).as_bytes())
-            .unwrap();
 
-        tx_mux2
-            .lock()
-            .unwrap()
-            .send(SleepMessage::StartTimer(dur))
-            .unwrap();
-    });
-    router_builder.get(r"/sleep/cancel", move |_: Request,
-          mut res: Response,
-          _: Captures| {
-        res.headers_mut().set(ContentType(Mime(
-            TopLevel::Text,
-            SubLevel::Plain,
-            vec![(Attr::Charset, Value::Utf8)],
-        )));
-        res.send(format!("Canceling sleep timer…\n").as_bytes())
-            .unwrap();
+    println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
+    let router = Router::build()
+        .add_get(r"/sleep/start/(\d+)", move |ctx: Context| {
+            let dur = match ctx.extract_captures() {
+                Ok((seconds,)) => std::time::Duration::from_secs(seconds),
+                Err(_) => return Err(Response::new().with_body("Seconds missing")),
+            };
+            let res = Response::new()
+                .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
+                .with_body(format!("Sleeping for {:?} seconds…\n", dur));
 
-        tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
-    });
-    router_builder.get(r"/sleep/status", status_handler);
-    router_builder.get(r"/pause", pause_handler);
-    router_builder.not_found(|_, res, _| { res.send(b"LaLaLa").unwrap(); });
+            tx_mux2
+                .lock()
+                .unwrap()
+                .send(SleepMessage::StartTimer(dur))
+                .unwrap();
+            Ok(res)
+        })
+        .add_get(r"/sleep/cancel", move |_: Context| {
+            let res = Response::new()
+                .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
+                .with_body(format!("Canceling sleep timer…\n"));
 
-    let router = router_builder.finalize().unwrap();
-
-    // You can pass the router to hyper's Server's handle function as it
-    // implements the Handle trait.
-    Server::http((LISTEN_IP, LISTEN_PORT))
-        .unwrap()
-        .handle(router)
+            tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
+            Ok::<_, Response>(res)
+        })
+        .add_get(r"/pause", pause_handler)
+        .add_get(r"/sleep/status", status_handler)
+        .add_not_found(|_| Ok::<_, Response>(Response::new().with_body("Route not found\n")))
+        .finish()
+        .unwrap();
+    router
+        .quick_serve(
+            num_cpus::get(),
+            net::SocketAddr::new(LISTEN_IP.parse().unwrap(), LISTEN_PORT),
+            || ::tokio_core::reactor::Core::new().unwrap(),
+        )
         .unwrap();
 }

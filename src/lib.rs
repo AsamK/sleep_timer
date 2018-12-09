@@ -1,3 +1,5 @@
+extern crate futures;
+extern crate http;
 extern crate hyper;
 extern crate mime;
 extern crate mpd;
@@ -5,18 +7,19 @@ extern crate num_cpus;
 extern crate reset_router;
 extern crate tokio_core;
 
-use hyper::header::ContentType;
-use hyper::server::Response;
+use futures::Future;
+use http::{Request, Response};
+use hyper::Body;
 use mpd::Client;
-use reset_router::hyper::Context;
-use reset_router::hyper::ext::ServiceExtensions;
-use reset_router::hyper::Router;
+use reset_router::bits::Method;
+use reset_router::RequestExtensions;
+use reset_router::Router;
 use std::error::Error;
 use std::net;
 use std::ops::Add;
 use std::ops::Sub;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
 
@@ -47,20 +50,22 @@ fn get_status() -> Result<mpd::Status, Box<Error>> {
     Ok(status)
 }
 
-fn status_handler(_: Context) -> Result<Response, Response> {
-    Ok(Response::new()
-        .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
-        .with_body(format!("{:?}\n", get_status())))
+fn status_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    Ok(Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(format!("{:?}\n", get_status()).into())
+        .unwrap())
 }
 
-fn pause_handler(_: Context) -> Result<Response, Response> {
+fn pause_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     let mut conn = connect_mpd().unwrap();
     conn.toggle_pause().expect("Failed to send pause command");
     let state = conn.status().expect("Failed to send status command").state;
 
-    Ok(Response::new()
-        .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
-        .with_body(format!("State is now {:?}!\n", state)))
+    Ok(Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(format!("State is now {:?}!\n", state).into())
+        .unwrap())
 }
 
 fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
@@ -120,40 +125,56 @@ pub fn run() -> Result<(), Box<Error>> {
 
     println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
     let router = Router::build()
-        .add_get(r"/sleep/start/(\d+)", move |ctx: Context| {
-            let dur = match ctx.extract_captures() {
-                Ok((seconds,)) => std::time::Duration::from_secs(seconds),
-                Err(_) => return Err(Response::new().with_body("Seconds missing")),
-            };
-            let res = Response::new()
-                .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
-                .with_body(format!("Sleeping for {:?} seconds…\n", dur));
+        .add(
+            Method::GET,
+            r"/sleep/start/(\d+)",
+            move |req: Request<Body>| -> Result<Response<Body>, Response<Body>> {
+                let (dur,) = req
+                    .parsed_captures::<(u64,)>()
+                    .map_err(|_| Response::builder().body("Seconds missing".into()).unwrap())?;
+                let seconds = std::time::Duration::from_secs(dur);
+                let res = Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(format!("Sleeping for {:?} seconds…\n", dur).into())
+                    .unwrap();
 
-            tx_mux2
-                .lock()
-                .unwrap()
-                .send(SleepMessage::StartTimer(dur))
-                .unwrap();
-            Ok(res)
+                tx_mux2
+                    .lock()
+                    .unwrap()
+                    .send(SleepMessage::StartTimer(seconds))
+                    .unwrap();
+                Ok(res)
+            },
+        )
+        .add(
+            Method::GET,
+            r"/sleep/cancel",
+            move |_: Request<Body>| -> Result<Response<Body>, Response<Body>> {
+                let res = Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(format!("Canceling sleep timer…\n").into())
+                    .unwrap();
+
+                tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
+                Ok(res)
+            },
+        )
+        .add(Method::GET, r"/pause", pause_handler)
+        .add(Method::GET, r"/sleep/status", status_handler)
+        .add_not_found(|_| -> Result<Response<Body>, Response<Body>> {
+            Ok(Response::builder()
+                .body("Route not found\n".into())
+                .unwrap())
         })
-        .add_get(r"/sleep/cancel", move |_: Context| {
-            let res = Response::new()
-                .with_header(ContentType(mime::TEXT_PLAIN_UTF_8))
-                .with_body(format!("Canceling sleep timer…\n"));
+        .finish()
+        .unwrap();
 
-            tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
-            Ok::<_, Response>(res)
-        })
-        .add_get(r"/pause", pause_handler)
-        .add_get(r"/sleep/status", status_handler)
-        .add_not_found(|_| Ok::<_, Response>(Response::new().with_body("Route not found\n")))
-        .finish()?;
+    let addr = net::SocketAddr::new(LISTEN_IP.parse().unwrap(), LISTEN_PORT);
+    let server = hyper::Server::bind(&addr)
+        .serve(router)
+        .map_err(|e| eprintln!("error: {}", e));
 
-    router
-        .quick_serve(
-            num_cpus::get(),
-            net::SocketAddr::new(LISTEN_IP.parse().unwrap(), LISTEN_PORT),
-            || ::tokio_core::reactor::Core::new().unwrap(),
-        )?;
+    hyper::rt::run(server);
+
     Ok(())
 }

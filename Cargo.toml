@@ -4,9 +4,11 @@ version = "0.1.0"
 authors = ["AsamK <asamk@gmx.de>"]
 
 [dependencies]
-hyper = "0.11"
+http = "0.1"
+hyper = "0.12"
 mime = "0.3.4"
 mpd = "0.0.12"
 num_cpus = "1.8"
-reset-router = "0.3.0"    # A RegexSet based path router for Hyper 0.11
+reset-router = "0.6.0"
 tokio-core = "0.1"
+futures = "0.1"

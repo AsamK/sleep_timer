@@ -152,7 +152,7 @@ pub fn run() -> Result<(), Box<Error>> {
             move |_: Request<Body>| -> Result<Response<Body>, Response<Body>> {
                 let res = Response::builder()
                     .header("Content-Type", "text/plain; charset=utf-8")
-                    .body(format!("Canceling sleep timer…\n").into())
+                    .body("Canceling sleep timer…\n".into())
                     .unwrap();
 
                 tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();

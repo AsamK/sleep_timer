@@ -45,7 +45,7 @@ fn connect_mpd() -> mpd::error::Result<Client> {
     Client::connect((MPD_IP, MPD_PORT))
 }
 
-fn get_status() -> Result<mpd::Status, Box<Error>> {
+fn get_status() -> Result<mpd::Status, Box<dyn Error>> {
     let status = connect_mpd()?.status()?;
     Ok(status)
 }
@@ -79,7 +79,7 @@ fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
     Ok(())
 }
 
-pub fn run() -> Result<(), Box<Error>> {
+pub fn run() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel::<SleepMessage>();
     thread::spawn(move || {
         let mut state = Option::None::<SleepTimerState>;

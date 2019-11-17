@@ -176,10 +176,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 .body("Route not found\n".into())
                 .unwrap())
         })
-        .finish()
-        .unwrap();
+        .finish()?;
 
-    let addr = net::SocketAddr::new(LISTEN_IP.parse().unwrap(), LISTEN_PORT);
+    let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
     let server = hyper::Server::bind(&addr)
         .serve(router)
         .map_err(|e| eprintln!("error: {}", e));

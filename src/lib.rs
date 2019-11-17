@@ -19,6 +19,7 @@ use std::net;
 use std::ops::Add;
 use std::ops::Sub;
 use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
@@ -50,6 +51,42 @@ fn get_status() -> Result<mpd::Status, Box<dyn Error>> {
     Ok(status)
 }
 
+#[derive(Clone)]
+struct Context {
+    tx: Arc<Mutex<Sender<SleepMessage>>>,
+}
+
+fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    let state = req.state::<Context>().unwrap();
+    let (dur,) = req
+        .parsed_captures::<(u64,)>()
+        .map_err(|_| Response::builder().body("Seconds missing".into()).unwrap())?;
+    let seconds = std::time::Duration::from_secs(dur);
+    let res = Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(format!("Sleeping for {:?} seconds…\n", dur).into())
+        .unwrap();
+
+    state
+        .tx
+        .lock()
+        .unwrap()
+        .send(SleepMessage::StartTimer(seconds))
+        .unwrap();
+    Ok(res)
+}
+
+fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    let state = req.state::<Context>().unwrap();
+    let res = Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body("Canceling sleep timer…\n".into())
+        .unwrap();
+
+    state.tx.lock().unwrap().send(SleepMessage::Cancel).unwrap();
+    Ok(res)
+}
+
 fn status_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     Ok(Response::builder()
         .header("Content-Type", "text/plain; charset=utf-8")
@@ -79,86 +116,59 @@ fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
     Ok(())
 }
 
+fn run_mpd_handler(rx: Receiver<SleepMessage>) {
+    let mut state = Option::None::<SleepTimerState>;
+    loop {
+        let message = match state {
+            Option::None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            Option::Some(state) => {
+                let now = time::Instant::now();
+
+                let timeout = if now.sub(state.start) > state.duration {
+                    time::Duration::new(0, 0)
+                } else {
+                    state.start.add(state.duration).sub(now)
+                };
+                rx.recv_timeout(timeout)
+            }
+        };
+        state = match message {
+            Err(e) => match e {
+                mpsc::RecvTimeoutError::Timeout => {
+                    match connect_mpd().and_then(|mut conn| sleep_now(&mut conn)) {
+                        Ok(_) => {}
+                        Err(e) => println!("Failed to connnect: {:?}", e),
+                    };
+
+                    Option::None
+                }
+                mpsc::RecvTimeoutError::Disconnected => return,
+            },
+            Ok(message) => match message {
+                SleepMessage::StartTimer(new_duration) => Option::from(SleepTimerState {
+                    duration: new_duration,
+                    start: time::Instant::now(),
+                }),
+                SleepMessage::Cancel => Option::None,
+            },
+        };
+    }
+}
+
 pub fn run() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel::<SleepMessage>();
-    thread::spawn(move || {
-        let mut state = Option::None::<SleepTimerState>;
-        loop {
-            let message = match state {
-                Option::None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                Option::Some(state) => {
-                    let now = time::Instant::now();
 
-                    let timeout = if now.sub(state.start) > state.duration {
-                        time::Duration::new(0, 0)
-                    } else {
-                        state.start.add(state.duration).sub(now)
-                    };
-                    rx.recv_timeout(timeout)
-                }
-            };
-            state = match message {
-                Err(e) => match e {
-                    mpsc::RecvTimeoutError::Timeout => {
-                        match connect_mpd().and_then(|mut conn| sleep_now(&mut conn)) {
-                            Ok(_) => {}
-                            Err(e) => println!("Failed to connnect: {:?}", e),
-                        };
+    thread::spawn(move || run_mpd_handler(rx));
 
-                        Option::None
-                    }
-                    mpsc::RecvTimeoutError::Disconnected => return,
-                },
-                Ok(message) => match message {
-                    SleepMessage::StartTimer(new_duration) => Option::from(SleepTimerState {
-                        duration: new_duration,
-                        start: time::Instant::now(),
-                    }),
-                    SleepMessage::Cancel => Option::None,
-                },
-            };
-        }
-    });
-
-    let tx_mux = Arc::new(Mutex::new(tx));
-    let tx_mux2 = tx_mux.clone();
+    let state = Context {
+        tx: Arc::new(Mutex::new(tx)),
+    };
 
     println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
     let router = Router::build()
-        .add(
-            Method::GET,
-            r"/sleep/start/(\d+)",
-            move |req: Request<Body>| -> Result<Response<Body>, Response<Body>> {
-                let (dur,) = req
-                    .parsed_captures::<(u64,)>()
-                    .map_err(|_| Response::builder().body("Seconds missing".into()).unwrap())?;
-                let seconds = std::time::Duration::from_secs(dur);
-                let res = Response::builder()
-                    .header("Content-Type", "text/plain; charset=utf-8")
-                    .body(format!("Sleeping for {:?} seconds…\n", dur).into())
-                    .unwrap();
-
-                tx_mux2
-                    .lock()
-                    .unwrap()
-                    .send(SleepMessage::StartTimer(seconds))
-                    .unwrap();
-                Ok(res)
-            },
-        )
-        .add(
-            Method::GET,
-            r"/sleep/cancel",
-            move |_: Request<Body>| -> Result<Response<Body>, Response<Body>> {
-                let res = Response::builder()
-                    .header("Content-Type", "text/plain; charset=utf-8")
-                    .body("Canceling sleep timer…\n".into())
-                    .unwrap();
-
-                tx_mux.lock().unwrap().send(SleepMessage::Cancel).unwrap();
-                Ok(res)
-            },
-        )
+        .with_state(state)
+        .add(Method::GET, r"/sleep/start/(\d+)", start_handler)
+        .add(Method::GET, r"/sleep/cancel", cancel_handler)
         .add(Method::GET, r"/pause", pause_handler)
         .add(Method::GET, r"/sleep/status", status_handler)
         .add_not_found(|_| -> Result<Response<Body>, Response<Body>> {

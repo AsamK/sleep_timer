@@ -7,7 +7,7 @@ extern crate num_cpus;
 extern crate reset_router;
 extern crate tokio_core;
 
-use futures::Future;
+use crate::hyper::rt::Future;
 use http::{Request, Response};
 use hyper::Body;
 use mpd::Client;

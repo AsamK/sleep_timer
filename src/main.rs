@@ -1,11 +1,12 @@
-extern crate sleep_timer;
-
 use std::process;
 
-fn main() {
+mod lib;
+
+#[tokio::main]
+async fn main() {
     println!("Starting mpd sleep timer server!");
 
-    if let Err(e) = sleep_timer::run() {
+    if let Err(e) = lib::run().await {
         println!("Application error: {}", e);
         process::exit(1);
     }

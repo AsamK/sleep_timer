@@ -1,17 +1,7 @@
-extern crate futures;
-extern crate http;
-extern crate hyper;
-extern crate mime;
-extern crate mpd;
-extern crate num_cpus;
-extern crate reset_router;
-extern crate tokio_core;
-
-use crate::hyper::rt::Future;
+use http::Method;
 use http::{Request, Response};
 use hyper::Body;
 use mpd::Client;
-use reset_router::bits::Method;
 use reset_router::RequestExtensions;
 use reset_router::Router;
 use std::error::Error;
@@ -56,8 +46,8 @@ struct Context {
     tx: Arc<Mutex<Sender<SleepMessage>>>,
 }
 
-fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
-    let state = req.state::<Context>().unwrap();
+async fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    let state = req.data::<Context>().unwrap();
     let (dur,) = req
         .parsed_captures::<(u64,)>()
         .map_err(|_| Response::builder().body("Seconds missing".into()).unwrap())?;
@@ -76,8 +66,8 @@ fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     Ok(res)
 }
 
-fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
-    let state = req.state::<Context>().unwrap();
+async fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    let state = req.data::<Context>().unwrap();
     let res = Response::builder()
         .header("Content-Type", "text/plain; charset=utf-8")
         .body("Canceling sleep timer…\n".into())
@@ -87,14 +77,14 @@ fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> 
     Ok(res)
 }
 
-fn status_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+async fn status_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     Ok(Response::builder()
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(format!("{:?}\n", get_status()).into())
         .unwrap())
 }
 
-fn pause_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+async fn pause_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     let mut conn = connect_mpd().unwrap();
     conn.toggle_pause().expect("Failed to send pause command");
     let state = conn.status().expect("Failed to send status command").state;
@@ -155,7 +145,7 @@ fn run_mpd_handler(rx: Receiver<SleepMessage>) {
     }
 }
 
-pub fn run() -> Result<(), Box<dyn Error>> {
+pub async fn run() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel::<SleepMessage>();
 
     thread::spawn(move || run_mpd_handler(rx));
@@ -166,24 +156,24 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
     let router = Router::build()
-        .with_state(state)
+        .data(state)
         .add(Method::GET, r"/sleep/start/(\d+)", start_handler)
         .add(Method::GET, r"/sleep/cancel", cancel_handler)
         .add(Method::GET, r"/pause", pause_handler)
         .add(Method::GET, r"/sleep/status", status_handler)
-        .add_not_found(|_| -> Result<Response<Body>, Response<Body>> {
-            Ok(Response::builder()
-                .body("Route not found\n".into())
-                .unwrap())
+        .add_not_found(|_| async {
+            Result::<Response<Body>, Response<Body>>::Ok(
+                Response::builder()
+                    .body("Route not found\n".into())
+                    .unwrap(),
+            )
         })
         .finish()?;
 
     let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
-    let server = hyper::Server::bind(&addr)
-        .serve(router)
-        .map_err(|e| eprintln!("error: {}", e));
+    let server = hyper::Server::bind(&addr).serve(router);
 
-    hyper::rt::run(server);
+    server.await?;
 
     Ok(())
 }

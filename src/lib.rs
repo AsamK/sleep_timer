@@ -8,11 +8,11 @@ use std::error::Error;
 use std::net;
 use std::ops::Add;
 use std::ops::Sub;
-use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 use std::time;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 const MPD_IP: &str = "127.0.0.1";
 const MPD_PORT: u16 = 6600;
@@ -60,8 +60,9 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Bo
     state
         .tx
         .lock()
-        .unwrap()
+        .await
         .send(SleepMessage::StartTimer(seconds))
+        .await
         .unwrap();
     Ok(res)
 }
@@ -73,7 +74,13 @@ async fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<B
         .body("Canceling sleep timer…\n".into())
         .unwrap();
 
-    state.tx.lock().unwrap().send(SleepMessage::Cancel).unwrap();
+    state
+        .tx
+        .lock()
+        .await
+        .send(SleepMessage::Cancel)
+        .await
+        .unwrap();
     Ok(res)
 }
 
@@ -106,25 +113,36 @@ fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
     Ok(())
 }
 
-fn run_mpd_handler(rx: Receiver<SleepMessage>) {
+pub enum RecvTimeoutError {
+    Timeout,
+    Disconnected,
+}
+
+async fn run_mpd_handler(mut rx: Receiver<SleepMessage>) {
     let mut state = Option::None::<SleepTimerState>;
     loop {
         let message = match state {
-            Option::None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            Option::None => rx
+                .recv()
+                .await
+                .ok_or_else(|| RecvTimeoutError::Disconnected),
             Option::Some(state) => {
                 let now = time::Instant::now();
 
-                let timeout = if now.sub(state.start) > state.duration {
+                let timeout_duration = if now.sub(state.start) > state.duration {
                     time::Duration::new(0, 0)
                 } else {
                     state.start.add(state.duration).sub(now)
                 };
-                rx.recv_timeout(timeout)
+                timeout(timeout_duration, rx.recv()).await.map_or_else(
+                    |_| Err(RecvTimeoutError::Timeout),
+                    |s| s.ok_or_else(|| RecvTimeoutError::Timeout),
+                )
             }
         };
         state = match message {
             Err(e) => match e {
-                mpsc::RecvTimeoutError::Timeout => {
+                RecvTimeoutError::Timeout => {
                     match connect_mpd().and_then(|mut conn| sleep_now(&mut conn)) {
                         Ok(_) => {}
                         Err(e) => println!("Failed to connnect: {:?}", e),
@@ -132,7 +150,7 @@ fn run_mpd_handler(rx: Receiver<SleepMessage>) {
 
                     Option::None
                 }
-                mpsc::RecvTimeoutError::Disconnected => return,
+                RecvTimeoutError::Disconnected => return,
             },
             Ok(message) => match message {
                 SleepMessage::StartTimer(new_duration) => Option::from(SleepTimerState {
@@ -146,9 +164,9 @@ fn run_mpd_handler(rx: Receiver<SleepMessage>) {
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
-    let (tx, rx) = mpsc::channel::<SleepMessage>();
+    let (tx, rx) = channel::<SleepMessage>(100);
 
-    thread::spawn(move || run_mpd_handler(rx));
+    tokio::spawn(run_mpd_handler(rx));
 
     let state = Context {
         tx: Arc::new(Mutex::new(tx)),

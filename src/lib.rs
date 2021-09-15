@@ -1,9 +1,9 @@
-use http::Method;
-use http::{Request, Response};
-use hyper::Body;
+use axum::extract::Extension;
+use axum::handler::{get, Handler};
+use axum::response::IntoResponse;
+use axum::{extract, AddExtensionLayer, Router};
+use http::StatusCode;
 use mpd::Client;
-use reset_router::RequestExtensions;
-use reset_router::Router;
 use std::error::Error;
 use std::net;
 use std::ops::Add;
@@ -46,16 +46,11 @@ struct Context {
     tx: Arc<Mutex<Sender<SleepMessage>>>,
 }
 
-async fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
-    let state = req.data::<Context>().unwrap();
-    let (dur,) = req
-        .parsed_captures::<(u64,)>()
-        .map_err(|_| Response::builder().body("Seconds missing".into()).unwrap())?;
+async fn start_handler(
+    Extension(state): Extension<Context>,
+    extract::Path(dur): extract::Path<u64>,
+) -> impl IntoResponse {
     let seconds = std::time::Duration::from_secs(dur);
-    let res = Response::builder()
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body(format!("Sleeping for {:?} seconds…\n", dur).into())
-        .unwrap();
 
     state
         .tx
@@ -64,16 +59,10 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, Response<Bo
         .send(SleepMessage::StartTimer(seconds))
         .await
         .unwrap();
-    Ok(res)
+    format!("Sleeping in {:?} seconds…\n", dur)
 }
 
-async fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
-    let state = req.data::<Context>().unwrap();
-    let res = Response::builder()
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body("Canceling sleep timer…\n".into())
-        .unwrap();
-
+async fn cancel_handler(Extension(state): Extension<Context>) -> &'static str {
     state
         .tx
         .lock()
@@ -81,25 +70,19 @@ async fn cancel_handler(req: Request<Body>) -> Result<Response<Body>, Response<B
         .send(SleepMessage::Cancel)
         .await
         .unwrap();
-    Ok(res)
+    "Canceling sleep timer…\n"
 }
 
-async fn status_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
-    Ok(Response::builder()
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body(format!("{:?}\n", get_status()).into())
-        .unwrap())
+async fn status_handler() -> impl IntoResponse {
+    format!("{:?}\n", get_status())
 }
 
-async fn pause_handler(_: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+async fn pause_handler() -> impl IntoResponse {
     let mut conn = connect_mpd().unwrap();
     conn.toggle_pause().expect("Failed to send pause command");
     let state = conn.status().expect("Failed to send status command").state;
 
-    Ok(Response::builder()
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body(format!("State is now {:?}!\n", state).into())
-        .unwrap())
+    format!("State is now {:?}!\n", state)
 }
 
 fn sleep_now(conn: &mut mpd::Client) -> mpd::error::Result<()> {
@@ -122,10 +105,7 @@ async fn run_mpd_handler(mut rx: Receiver<SleepMessage>) {
     let mut state = Option::None::<SleepTimerState>;
     loop {
         let message = match state {
-            Option::None => rx
-                .recv()
-                .await
-                .ok_or(RecvTimeoutError::Disconnected),
+            Option::None => rx.recv().await.ok_or(RecvTimeoutError::Disconnected),
             Option::Some(state) => {
                 let now = time::Instant::now();
 
@@ -163,6 +143,10 @@ async fn run_mpd_handler(mut rx: Receiver<SleepMessage>) {
     }
 }
 
+async fn handler_404() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "Route not found\n")
+}
+
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = channel::<SleepMessage>(100);
 
@@ -173,25 +157,19 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     };
 
     println!("Listening on {}:{}", LISTEN_IP, LISTEN_PORT);
-    let router = Router::build()
-        .data(state)
-        .add(Method::GET, r"/sleep/start/(\d+)", start_handler)
-        .add(Method::GET, r"/sleep/cancel", cancel_handler)
-        .add(Method::GET, r"/pause", pause_handler)
-        .add(Method::GET, r"/sleep/status", status_handler)
-        .add_not_found(|_| async {
-            Result::<Response<Body>, Response<Body>>::Ok(
-                Response::builder()
-                    .body("Route not found\n".into())
-                    .unwrap(),
-            )
-        })
-        .finish()?;
+    let router = Router::new()
+        .route("/sleep/start/:dur", get(start_handler))
+        .route("/sleep/cancel", get(cancel_handler))
+        .route("/pause", get(pause_handler))
+        .route("/sleep/status", get(status_handler))
+        .layer(AddExtensionLayer::new(state))
+        .or(handler_404.into_service());
 
     let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
-    let server = hyper::Server::bind(&addr).serve(router);
 
-    server.await?;
+    axum::Server::bind(&addr)
+        .serve(router.into_make_service())
+        .await?;
 
     Ok(())
 }

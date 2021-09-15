@@ -5,10 +5,9 @@ authors = ["AsamK <asamk@gmx.de>"]
 edition = "2018"
 
 [dependencies]
+axum = "0.2"
 http = "0.2"
-hyper = "0.13"
 mime = "0.3"
 mpd = "0.0.12"
 num_cpus = "1"
-reset-router = "0.8"
-tokio = { version = "0.2", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

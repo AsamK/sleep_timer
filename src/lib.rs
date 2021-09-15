@@ -125,7 +125,7 @@ async fn run_mpd_handler(mut rx: Receiver<SleepMessage>) {
             Option::None => rx
                 .recv()
                 .await
-                .ok_or_else(|| RecvTimeoutError::Disconnected),
+                .ok_or(RecvTimeoutError::Disconnected),
             Option::Some(state) => {
                 let now = time::Instant::now();
 
@@ -136,7 +136,7 @@ async fn run_mpd_handler(mut rx: Receiver<SleepMessage>) {
                 };
                 timeout(timeout_duration, rx.recv()).await.map_or_else(
                     |_| Err(RecvTimeoutError::Timeout),
-                    |s| s.ok_or_else(|| RecvTimeoutError::Timeout),
+                    |s| s.ok_or(RecvTimeoutError::Timeout),
                 )
             }
         };

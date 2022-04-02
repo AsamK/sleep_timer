@@ -2,7 +2,7 @@
 name = "sleep_timer"
 version = "0.1.0"
 authors = ["AsamK <asamk@gmx.de>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 axum = "0.5"

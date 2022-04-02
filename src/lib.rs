@@ -1,7 +1,8 @@
 use axum::extract::Extension;
-use axum::handler::{get, Handler};
+use axum::handler::Handler;
 use axum::response::IntoResponse;
-use axum::{extract, AddExtensionLayer, Router};
+use axum::routing::get;
+use axum::{extract, Router};
 use http::StatusCode;
 use mpd::Client;
 use std::error::Error;
@@ -14,7 +15,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-const MPD_IP: &str = "127.0.0.1";
+const MPD_IP: &str = "192.168.178.37";
 const MPD_PORT: u16 = 6600;
 
 const LISTEN_IP: &str = "0.0.0.0";
@@ -162,8 +163,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .route("/sleep/cancel", get(cancel_handler))
         .route("/pause", get(pause_handler))
         .route("/sleep/status", get(status_handler))
-        .layer(AddExtensionLayer::new(state))
-        .or(handler_404.into_service());
+        .layer(Extension(state))
+        .fallback(handler_404.into_service());
 
     let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
 

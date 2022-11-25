@@ -1,5 +1,4 @@
-use axum::extract::Extension;
-use axum::handler::Handler;
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{extract, Router};
@@ -48,7 +47,7 @@ struct Context {
 }
 
 async fn start_handler(
-    Extension(state): Extension<Context>,
+    State(state): State<Context>,
     extract::Path(dur): extract::Path<u64>,
 ) -> impl IntoResponse {
     let seconds = std::time::Duration::from_secs(dur);
@@ -63,7 +62,7 @@ async fn start_handler(
     format!("Sleeping in {:?} seconds…\n", dur)
 }
 
-async fn cancel_handler(Extension(state): Extension<Context>) -> &'static str {
+async fn cancel_handler(State(state): State<Context>) -> &'static str {
     state
         .tx
         .lock()
@@ -163,8 +162,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .route("/sleep/cancel", get(cancel_handler))
         .route("/pause", get(pause_handler))
         .route("/sleep/status", get(status_handler))
-        .layer(Extension(state))
-        .fallback(handler_404.into_service());
+        .with_state(state)
+        .fallback(handler_404);
 
     let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
 

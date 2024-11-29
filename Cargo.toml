@@ -2,12 +2,12 @@
 name = "sleep_timer"
 version = "0.1.0"
 authors = ["AsamK <asamk@gmx.de>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-axum = "0.6"
-http = "0.2"
+axum = "0.7"
+http = "1"
 mime = "0.3"
-mpd = "0.0.12"
+mpd = "0.1"
 num_cpus = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

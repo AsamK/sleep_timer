@@ -167,8 +167,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let addr = net::SocketAddr::new(LISTEN_IP.parse()?, LISTEN_PORT);
 
-    axum::Server::bind(&addr)
-        .serve(router.into_make_service())
+    let listener = tokio::net::TcpListener::bind(addr).await. unwrap();
+    axum::serve::serve(listener, router.into_make_service())
         .await?;
 
     Ok(())
